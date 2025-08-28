@@ -1,0 +1,47 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+
+# --- Environnements ---
+.venv/
+venv/
+env/
+ENV/
+*.env
+*.venv
+
+# --- Jupyter Notebook ---
+.ipynb_checkpoints/
+*.nbconvert.ipynb
+
+# --- Logs & caches ---
+*.log
+*.out
+*.err
+*.bak
+*.swp
+.DS_Store
+Thumbs.db
+pytest_cache/
+.cache/
+
+# --- Distribution / packaging ---
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# --- IDE / éditeurs ---
+.vscode/
+.idea/
+*.iml
+
+# --- Données lourdes (optionnel) ---
+data/
+*.csv
+*.h5
+*.parquet
+*.pkl
