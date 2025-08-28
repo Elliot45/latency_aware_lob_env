@@ -95,9 +95,9 @@ Exemple de rendu de l’observation vectorisée :
 - [x] Random Agent
 - [x] Tests Pytest
 - [x] Notebook de démo
-- [ ] Connexion avec `lob_simulator_core` (Projet 1)
-- [ ] Ajout d’indicateurs microstructure (Projet 5)
-- [ ] Agents RL (DQN, PPO, SAC) (Projets 3–4)
+- [ ] Connexion avec `lob_simulator_core` 
+- [ ] Ajout d’indicateurs microstructure 
+- [ ] Agents RL (DQN, PPO, SAC) 
 
 ---
 
