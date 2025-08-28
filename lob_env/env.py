@@ -1,5 +1,7 @@
 from typing import Optional, Dict, Any, Tuple
 import numpy as np
+import gymnasium as gym
+from gymnasium import spaces
 
 # Support gymnasium d'abord, fallback sur gym
 try:
@@ -36,6 +38,8 @@ class LatencyAwareLOBEnv(gym.Env):
         slippage_bps: float = 1.0,
         max_episode_steps: int = 20_000,
         trade_size: float = 1.0,
+        alpha_strength: float = 0.02,
+        inactivity_penalty: float = 0.0,
         external_lob: Optional[object] = None,
         seed: Optional[int] = None,
         include_features: Tuple[str, ...] = ("lob", "mid", "inventory", "cash", "queue_len"),
@@ -53,8 +57,8 @@ class LatencyAwareLOBEnv(gym.Env):
             self.lob = external_lob
         else:
             # Import paresseux pour ne pas forcer la dépendance dans les tests
-            from lob_simulator_core import LOBSimulator  # type: ignore
-            self.lob = LOBSimulator(depth=depth)
+            from lob_simulator_core import LOBSimulator, LOBConfig  # type: ignore
+            self.lob = LOBSimulator(config=LOBConfig(depth_levels=depth))
 
         self.depth = int(depth)
         self.queue = LatencyQueue(default_delay=latency_ticks)
@@ -63,6 +67,8 @@ class LatencyAwareLOBEnv(gym.Env):
         self.exec_model = ExecutionModel(fee_rate=fee_rate, slippage_bps=slippage_bps)
         self.max_episode_steps = int(max_episode_steps)
         self.trade_size = float(trade_size)
+        self.alpha_strength = float(alpha_strength)
+        self.inactivity_penalty = float(inactivity_penalty)
 
         # --- définir ces attributs AVANT de construire observation_space ---
         self.include_features = tuple(include_features)
@@ -130,18 +136,17 @@ class LatencyAwareLOBEnv(gym.Env):
 
         # 2) Place ordre dans la file (latence + jitter)
         if order is not None:
-            delay = self.latency_ticks
+            delay = int(self.latency_ticks)
             if self.latency_jitter > 0:
-                # jitter uniforme entier dans [-j, +j]
-                jitter = self._np_rng.integers(-self.latency_jitter, self.latency_jitter + 1)
-                delay = max(0, int(delay + jitter))
+                jitter = int(self._np_rng.integers(-self.latency_jitter, self.latency_jitter + 1))
+                delay = max(0, delay + jitter)
             self.queue.add(order, delay=delay)
 
         # 3) Exécuter ordres arrivés à échéance
         executed = self.queue.process()
-        mid = self._get_mid()
+        mid_before = self._get_mid()
         for ex in executed:
-            fill, fees = self.exec_model.execute(ex, mid)
+            fill, fees = self.exec_model.execute(ex, mid_before)
             notional = abs(ex.size) * fill
             if ex.side == Side.BUY:
                 self.cash -= notional + fees
@@ -158,8 +163,50 @@ class LatencyAwareLOBEnv(gym.Env):
         obs = self._get_observation()
         mid = self._get_mid()
         equity = self._equity(mid)
-        reward = equity - self._prev_equity
+        reward = equity - self._prev_equity  # PnL net des coûts & slippage
         self._prev_equity = equity
+
+        # 5.b) Micro-alpha: Order Book Imbalance (OBI) → petite prime directionnelle
+        # OBI ∈ [-1, 1] ; si tu as des helpers best(), utilise-les, sinon on lit la structure.
+        bid_vol_L1 = 0.0
+        ask_vol_L1 = 0.0
+        try:
+            # si OrderBookSide expose best() -> (price, volume)
+            _, bid_vol_L1 = self.lob.bids.best()
+            _, ask_vol_L1 = self.lob.asks.best()
+        except Exception:
+            # fallback sur tes structures internes
+            if getattr(self.lob.bids, "_prices_sorted", None):
+                p_bid = max(self.lob.bids._prices_sorted)
+                bid_vol_L1 = float(self.lob.bids.levels.get(p_bid, 0.0))
+            if getattr(self.lob.asks, "_prices_sorted", None):
+                p_ask = min(self.lob.asks._prices_sorted)
+                ask_vol_L1 = float(self.lob.asks.levels.get(p_ask, 0.0))
+
+        den = bid_vol_L1 + ask_vol_L1
+        if den <= 1e-6:
+            obi = 0.0
+        else:
+            obi = (bid_vol_L1 - ask_vol_L1) / den
+            # clamp par prudence numérique
+            if obi > 1.0: obi = 1.0
+            if obi < -1.0: obi = -1.0
+
+        edge = self.alpha_strength * obi
+        if action == 1:        # BUY (market)
+            reward += edge
+        elif action == 2:      # SELL (market)
+            reward -= edge
+
+        # 5.c) (optionnel) légère pénalité d'inactivité pour éviter HOLD absolu
+        if self.inactivity_penalty > 0.0 and action == 0:  # HOLD
+            reward -= self.inactivity_penalty
+
+        # garde-fous numériques
+        if not np.isfinite(reward):
+         reward = 0.0
+        if not np.all(np.isfinite(obs)):
+            obs = np.nan_to_num(obs, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
 
         # 6) Terminaison
         done_sim = bool(getattr(self.lob, "done", False))
@@ -173,6 +220,7 @@ class LatencyAwareLOBEnv(gym.Env):
             "equity": float(equity),
             "queue_len": len(self.queue),
             "executed_count": len(executed),
+            "obi": float(obi),
         }
 
         if _GYMNASIUM:
